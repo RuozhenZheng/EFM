@@ -1,0 +1,50 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import gc
+from tensorflow.keras.losses import binary_crossentropy
+from tensorflow.keras.optimizers import Adam,SGD
+from tensorflow.keras.metrics import AUC
+from tensorflow.keras.metrics import binary_accuracy
+from model import EFM
+from data_proces import load_user,load_paper_info,conv_paper_title,create_dataset_t1
+from tensorflow.keras.callbacks import ModelCheckpoint
+
+
+if __name__ == '__main__':
+    import os
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+    # ========================= Hyper Parameters =======================
+    # you can modify your file path
+    test_size = 0.2
+    k = 28
+    learning_rate = 0.01
+    batch_size = 8000
+    epochs = 8
+
+    papers = load_paper_info()
+    dropout_layer, title_feature_column = conv_paper_title(papers)
+    # ========================== Create dataset =======================
+    filepath_1 = 'modify_3/save_1/fm_1.epoch_{epoch:04d}.binary_accuracy_{binary_accuracy:.4f}.hdf5'
+    checkpoint_1 = ModelCheckpoint(filepath_1, monitor='binary_accuracy', save_weights_only=True, verbose=1, period=epochs)
+    #filepath_2 = 'modify_3/save_2/fm_2.epoch_{epoch:04d}.binary_accuracy_{binary_accuracy:.4f}.hdf5'
+    #checkpoint_2 = ModelCheckpoint(filepath_2, monitor='binary_accuracy', save_weights_only=True, verbose=1, period=epochs)
+    #filepath_3 = 'modify_3/save_3/fm_3.epoch_{epoch:04d}.binary_accuracy_{binary_accuracy:.4f}.hdf5'
+    #checkpoint_3 = ModelCheckpoint(filepath_3, monitor='binary_accuracy', save_weights_only=True, verbose=1, period=epochs)
+
+    for iter_num in range(22):
+        #iter = random.randint(0,45)
+
+        user_paper, user_array, label, user_paper_test, user_array_test, label_test,user_featrue_column, paper_featrue_column = load_user(iter_num)
+        featrue_columns_1, train_x_1, train_y_1 = create_dataset_t1(dropout_layer, title_feature_column,user_paper,user_array, label, user_featrue_column, paper_featrue_column)
+
+        if iter_num == 0:
+            model_1 = EFM(feature_columns=featrue_columns_1, k=k)
+            model_1.compile(loss=binary_crossentropy, optimizer=Adam(learning_rate=learning_rate),metrics=[AUC(),binary_accuracy])
+        model_1.fit(train_x_1, train_y_1, epochs=epochs,callbacks=[checkpoint_1],batch_size=batch_size, validation_split=0.3,shuffle=False)
+        #model_1.fit(train_x_1, train_y_1, epochs=epochs, callbacks=[checkpoint_1], batch_size=batch_size, shuffle=False, steps_per_epoch=1)
+
+        del featrue_columns_1, train_x_1, train_y_1
+        gc.collect()
