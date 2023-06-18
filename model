@@ -1,0 +1,16 @@
+class FM(tf.keras.Model):
+    def __init__(self, feature_columns, k, w_reg=1e-3, v_reg=1e-3):
+        """
+        Factorization Machines
+        :param feature_columns: a list containing dense and sparse column feature information
+        :param k: the latent vector
+        :param w_reg: the regularization coefficient of parameter w
+		:param v_reg: the regularization coefficient of parameter v
+        """
+        super(FM, self).__init__()
+        self.fm = FM_Layer(feature_columns, k, w_reg, v_reg) #运行__init__函数
+
+    def call(self, inputs, **kwargs):
+        fm_outputs = self.fm(inputs) #运行call函数
+        outputs = tf.nn.sigmoid(fm_outputs)
+        return outputs
