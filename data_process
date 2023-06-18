@@ -1,0 +1,256 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from collections import Counter
+from deepwalk import citation_network
+from sklearn.preprocessing import MinMaxScaler
+import random
+
+def load_paper_info():
+   
+    papers = pd.read_csv('../citeulike-a-master/raw-data.csv', header=0, usecols=[0, 1], engine='python')
+    
+    title_set = set()
+    for val in papers['title'].str.split():
+        title_set.update(val)
+    title_set.add('<PAD>')
+    title2int = {val: ii for ii, val in enumerate(title_set)}
+    title_map = {val: [title2int[row] for row in val.split()] for ii, val in enumerate(set(papers['title']))}
+    for key in title_map:
+        for cnt in range(max(title2int.values()) - len(title_map[key])):
+            # e.g. title_map = {'exploring complex networks':[11,4,9,3,3,3,3,3,3,3,3,...],...}
+            title_map[key].insert(len(title_map[key]) + cnt, title2int['<PAD>'])  
+    papers['title'] = papers['title'].map(title_map)
+    return papers
+
+def conv_paper_title(papers, embed_dim=8, window_sizes = {2, 3, 4, 5}, filter_num = 8, dropout_keep = 0.5):
+    paper_title = papers['title']
+    epcho = 12
+    paper_title = np.array(paper_title.tolist())
+    paper_title_max = np.max(paper_title) + 1  
+    title_length = paper_title.shape[1] + 1
+    paper_title = tf.convert_to_tensor(paper_title)
+    size = int(int(paper_title.shape[0]) / epcho)
+    for i in range(epcho):
+           paper_title_batch = paper_title[size*i:size*(i+1)]
+           paper_title_embed_layer = tf.keras.layers.Embedding(paper_title_max, embed_dim, input_length=title_length,
+                                                               name='paper_title_embed_layer')(paper_title_batch)
+           sp = paper_title_embed_layer.shape  # (3, 16, 10)
+           paper_title_embed_layer_expand = tf.keras.layers.Reshape([sp[1], sp[2], 1])(
+                  paper_title_embed_layer)  # (3,16,10,1)
+           pool_layer_lst = []
+           sentences_size = title_length - 1
+           for window_size in window_sizes:
+                  conv_layer = tf.keras.layers.Conv2D(filter_num, (window_size, embed_dim), 1, activation='relu')(
+                         paper_title_embed_layer_expand)
+                  maxpool_layer = tf.keras.layers.MaxPooling2D(pool_size=(sentences_size - window_size + 1, 1),
+                                                               strides=1)(conv_layer)
+                  # print(window_size, maxpool_layer.shape)
+                  # pool_layer_lst: (1, 3, 1, 1, 8) / (2, 3, 1, 1, 8) / (3, 3, 1, 1, 8) / (4, 3, 1, 1, 8)
+                  pool_layer_lst.append(maxpool_layer)
+           pool_layer = tf.keras.layers.concatenate(pool_layer_lst, 3, name="pool_layer")  # (3, 1, 1, 32)
+           max_num = len(window_sizes) * filter_num  # 32
+           pool_layer_flat = tf.keras.layers.Reshape([1, max_num], name="pool_layer_flat")(pool_layer)  # (3, 1, 32)
+           dropout_layer = tf.keras.layers.Dropout(dropout_keep, name="dropout_layer_0")(pool_layer_flat)  # (3, 1, 32)
+           dropout_layer = tf.keras.layers.Reshape([max_num], name="dropout_layer")(dropout_layer)
+           if i == 0:
+               d = dropout_layer
+           if i != 0:
+               d = tf.concat([d, dropout_layer], 0)
+    dropout_layer = d
+    title_feature_column = dropout_layer.shape[1]  # 32
+    return dropout_layer, title_feature_column
+    
+def load_user(iter_num):
+    user_featrue_column = 250 # sum of users
+    paper_featrue_column = 16980 # sum of papers
+    title = ['collect_paper']
+    users = pd.read_csv('../citeulike-a-master/users.dat', header=None, skiprows = user_featrue_column*iter_num, nrows=user_featrue_column, names=title, engine='python')
+    user_id = {'user_id': list(range(iter_num*user_featrue_column, user_featrue_column*(iter_num+1)))}
+    user_id = pd.DataFrame(user_id)
+    users = pd.concat([user_id, users], axis=1)  
+    users_ori = users
+
+    users = users.set_index(['user_id'])  
+    s = users['collect_paper']
+    users = s.str.split(" ", expand=True)
+    # 测试时
+    users_test = users[[0, 1, 2]]
+    # 训练时
+    users.drop(users.columns[0:3], axis=1,inplace=True)
+    users1 = users
+    s = users.stack()
+    users = s.reset_index()
+    users = users.filter(regex='user_id|0')
+    users = users.rename(columns={0: 'collect_paper'})
+    users[:] = users[:].astype(int)
+    user_paper = users
+    user_for_neg = user_paper
+
+    # positive
+    pos = {'label': [1] * user_paper.shape[0]}
+    pos = pd.DataFrame(pos)
+    user_pos = pd.concat([user_paper, pos], axis=1) 
+    # negtive
+    for i in range(user_for_neg.shape[0]):
+        neg_label = user_for_neg.iloc[i, 1]
+        pos_list = users_ori.iloc[user_for_neg.iloc[i, 0] - (iter_num * user_featrue_column), 1]
+        while str(neg_label) in pos_list:
+            neg_label = np.random.randint(0, 16890 + 1)
+        user_for_neg.iloc[i, 1] = neg_label
+    neg = {'label': [0] * users.shape[0]}
+    neg = pd.DataFrame(neg)
+    user_for_neg = pd.concat([user_for_neg, neg], axis=1)
+
+    user_paper = pd.concat([user_pos, user_for_neg], axis=0)
+    user_paper = user_paper.infer_objects()
+    user_paper = user_paper.sort_values(by=['user_id','label'],ascending=(True,False))
+    user_paper = np.array(user_paper)
+    label = user_paper[:,2]
+    user_paper = user_paper[:,0:2]
+
+    users1 = users1.fillna(-1)  
+    users1[:] = users1[:].astype(int)  
+    user_array = np.array(users1)
+
+    # test
+    users1_test = users_test
+    s_test = users_test.stack()
+    users_test = s_test.reset_index()
+    users_test = users_test.filter(regex='user_id|0')
+    users_test = users_test.rename(columns={0: 'collect_paper'})
+    users_test[:] = users_test[:].astype(int)
+    user_paper_test = users_test
+    user_for_neg_test = user_paper_test
+
+    # pos
+    pos_test = {'label': [1] * user_paper_test.shape[0]}
+    pos_test = pd.DataFrame(pos_test)
+    user_pos_test = pd.concat([user_paper_test, pos_test], axis=1) 
+    # neg
+    for i in range(user_for_neg_test.shape[0]):
+        neg_label_test = user_for_neg_test.iloc[i, 1]
+        pos_list = users_ori.iloc[user_for_neg_test.iloc[i, 0] - (iter_num * user_featrue_column), 1]
+        while str(neg_label_test) in pos_list:
+            neg_label_test = np.random.randint(0, 16890 + 1)
+        user_for_neg_test.iloc[i, 1] = neg_label_test
+    neg_test = {'label': [0] * users_test.shape[0]}
+    neg_test = pd.DataFrame(neg_test)
+    user_for_neg_test = pd.concat([user_for_neg_test, neg_test], axis=1)
+
+    # combine
+    user_paper_test = pd.concat([user_pos_test, user_for_neg_test], axis=0)
+    user_paper_test = user_paper_test.infer_objects()
+    user_paper_test = user_paper_test.sort_values(by=['user_id', 'label'], ascending=(True, False))
+    user_paper_test = np.array(user_paper_test)
+    label_test = user_paper_test[:, 2]
+    user_paper_test = user_paper_test[:, 0:2]
+
+    users1_test = users1_test.fillna(-1)  
+    users1_test[:] = users1_test[:].astype(int) 
+    user_array_test = np.array(users1_test)
+
+
+    return user_paper,user_array,label,user_paper_test,user_array_test,label_test,user_featrue_column,paper_featrue_column
+    
+   
+def load_user_test(iter_num):
+    user_featrue_column = 250 # sum of users
+    paper_featrue_column = 16980 # sum of papers
+    title = ['collect_paper']
+    users = pd.read_csv('../citeulike-a-master/users.dat', header=None, skiprows = user_featrue_column*iter_num, nrows=user_featrue_column, names=title, engine='python')
+    user_id = {'user_id': list(range(iter_num*user_featrue_column, user_featrue_column*(iter_num+1)))}
+    user_id = pd.DataFrame(user_id)
+    users = pd.concat([user_id, users], axis=1) 
+    users_ori = users
+
+    users = users.set_index(['user_id'])  
+    s = users['collect_paper']
+    users = s.str.split(" ", expand=True)
+    # 训练时
+    # users.drop(users.columns[0:3], axis=1,inplace=True)
+    # 测试时
+    users_test = users[[0,1,2]]
+    users1_test = users_test
+    s_test = users_test.stack()
+    users_test = s_test.reset_index()
+    users_test = users_test.filter(regex='user_id|0')
+    users_test = users_test.rename(columns={0: 'collect_paper'})
+    users_test[:] = users_test[:].astype(int)
+    user_paper_test = users_test
+    user_for_neg_test = user_paper_test
+
+    # pos
+    pos_test = {'label': [1] * user_paper_test.shape[0]}
+    pos_test = pd.DataFrame(pos_test)
+    user_pos_test = pd.concat([user_paper_test, pos_test], axis=1) 
+    # neg
+    for i in range(user_for_neg_test.shape[0]):
+        neg_label_test = user_for_neg_test.iloc[i, 1]
+        pos_list = users_ori.iloc[user_for_neg_test.iloc[i, 0] - (iter_num*user_featrue_column), 1]
+        while str(neg_label_test) in pos_list:
+            neg_label_test = np.random.randint(0, 16890 + 1)
+        user_for_neg_test.iloc[i, 1] = neg_label_test
+    neg_test = {'label': [0] * users_test.shape[0]}
+    neg_test = pd.DataFrame(neg_test)
+    user_for_neg_test = pd.concat([user_for_neg_test, neg_test], axis=1)
+
+    # combine
+    user_paper_test = pd.concat([user_pos_test, user_for_neg_test], axis=0)
+    user_paper_test = user_paper_test.infer_objects()
+    user_paper_test = user_paper_test.sort_values(by=['user_id', 'label'], ascending=(True, False))
+    user_paper_test = np.array(user_paper_test)
+    label_test = user_paper_test[:, 2]
+    user_paper_test = user_paper_test[:, 0:2]
+
+    users1_test = users1_test.fillna(-1) 
+    users1_test[:] = users1_test[:].astype(int) 
+    user_array_test = np.array(users1_test)
+
+    return user_paper_test,user_array_test,label_test,user_featrue_column,paper_featrue_column
+  
+  def create_dataset_t1(dropout_layer, title_feature_column, user_paper, user_array, label, user_featrue_column, paper_featrue_column):
+    #user_paper, user_array, label, user_featrue_column, paper_featrue_column = load_uesr(iter_num)
+    count1 = label.shape[0]
+    count2 = int(count1 / 2)
+    count3 = int(count2 / 2)
+
+    title2users_feature = title2users(user_paper, dropout_layer)
+    user_collect_paper = u_collect_paper(user_paper, user_array, paper_featrue_column)
+    featrue_columns = {'user_featrue_column': user_featrue_column, 'paper_featrue_column': paper_featrue_column,
+                       'title_feature_column': title_feature_column}
+
+    l1 = np.where(label==1)[0].tolist()
+    l2 = np.where(label==0)[0].tolist()
+    l3 = random.sample(l2, count3)
+    index = l1 + l3
+
+    user_paper = tf.convert_to_tensor(user_paper)
+    user_paper = tf.gather(user_paper,axis=0,indices=index)
+
+    # user_collect_paper = user_collect_paper
+    user_collect_paper = tf.gather(user_collect_paper,axis=0,indices=index)
+
+    label = tf.convert_to_tensor(label, dtype=tf.float32)
+    label = tf.expand_dims(label, 1)
+    label = tf.gather(label,axis=0,indices=index)
+
+    title2users_feature = tf.gather(title2users_feature,axis=0,indices=index)
+
+    user = tf.one_hot(user_paper[:, 0], depth=user_featrue_column)
+    paper = tf.one_hot(user_paper[:, 1], depth=paper_featrue_column)  # float32
+    stack = tf.concat([user, paper, user_collect_paper, title2users_feature, label], axis=1)
+    stack = tf.random.shuffle(stack)
+    train_y = stack[:, -1]
+    train_x = stack[:, 0:-1]
+
+    x_mean, x_var = tf.nn.moments(train_x, axes=[0, 1])
+    c1 = train_x.shape[0]
+    c2 = train_x.shape[1]
+    scale = tf.Variable(tf.ones([c1, c2]))
+    shift = tf.Variable(tf.zeros([c1, c2]))
+    train_x = tf.nn.batch_normalization(train_x,x_mean,x_var,shift,scale,variance_epsilon=0.001)
+
+
+    return featrue_columns, train_x, train_y
