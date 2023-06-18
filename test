@@ -1,0 +1,41 @@
+import gc
+from tensorflow.keras.losses import binary_crossentropy
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.metrics import AUC
+from tensorflow.keras.metrics import binary_accuracy
+from model import EFM
+from data_process import load_paper_info, conv_paper_title, create_dataset_t1, load_user,load_user_test
+from tensorflow.keras import backend as K
+
+
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+if __name__ == '__main__':
+    # ========================= Hyper Parameters =======================
+    # you can modify your file path
+    k = 28
+    learning_rate = 0.01
+    papers = load_paper_info()
+    dropout_layer, title_feature_column = conv_paper_title(papers)
+    # ========================== Create dataset =======================
+    # papers = load_paper_info()
+    # dropout_layer, title_feature_column = conv_paper_title(papers)
+    # user_paper, user_collect_paper, label, user_featrue_column, paper_featrue_column = load_uesr()
+    # title2users_feature = title2users(user_paper,dropout_layer)
+    K.set_learning_phase(1)
+
+    for iter_num in range(22):
+        user_paper, user_array, label, user_featrue_column, paper_featrue_column = load_user_test(iter_num)
+        featrue_columns_1, test_x_1, test_y_1 = create_dataset_t1(dropout_layer, title_feature_column, user_paper,user_array, label, user_featrue_column,paper_featrue_column)
+        model1 = EFM(feature_columns=featrue_columns_1, k=k)
+        model1.compile(loss=binary_crossentropy, optimizer=Adam(learning_rate=learning_rate),
+                      metrics=[AUC(),binary_accuracy])
+        model1.fit(test_x_1, test_y_1, epochs=0,shuffle=False)
+        model1.load_weights("./modify_3/save_1/fm_1.epoch_0008.binary_accuracy_0.9969.hdf5")
+        print('model1: test accuracy: %f' % model1.evaluate(test_x_1, test_y_1)[2])
+      
+        del featrue_columns_1, test_x_1, test_y_1
+        gc.collect()
