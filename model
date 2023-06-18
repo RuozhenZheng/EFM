@@ -1,4 +1,4 @@
-class FM(tf.keras.Model):
+class EFM(tf.keras.Model):
     def __init__(self, feature_columns, k, w_reg=1e-3, v_reg=1e-3):
         """
         Factorization Machines
